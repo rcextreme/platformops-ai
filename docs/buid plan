@@ -209,4 +209,59 @@ Reserve about 20% of each day for integration and debugging. Prioritize a comple
 9. Run locally and verify `/health`, `/api/platform/overview`, `/docs`, and frontend.
 10. Commit and push initial foundation.
 
+Milestone 2 — Simulated platform infrastructure
+- Tenants, clusters, nodes, namespaces and workloads
+- Ingress, gateways and service health
+- Kubernetes events and application logs
+- ArgoCD deployment status
+- Simulated infrastructure failures
+
+
+
+Milestone 3 — AI investigation engine
+- Connect to an LLM
+- Investigate support tickets
+- Collect and correlate infrastructure evidence
+- Identify root causes
+- Generate recommendations with supporting evidence
+
+
+
+Milestone 4 — Decision engine and remediation
+- Automatic safe fixes
+- Human approval workflow
+- Jira escalation
+- Simulated remediation execution
+- Post-remediation health verification
+- Audit trail
+
+
+
+Milestone 5 — Proactive platform operations
+- Kubernetes version lifecycle
+- Vulnerability and deprecated API detection
+- Expiring certificates and credentials
+- Maintenance recommendations
+- Jira epics and implementation plans
+
+
+
+Milestone 6 — Final product experience
+- Platform overview dashboard
+- Infrastructure inventory
+- Support ticket management
+- AI investigation history
+- Approval center
+- Maintenance roadmap
+- Engineering backlog
+
+
+
+Milestone 7 — Vultr deployment and hackathon demo
+- Deploy to Vultr
+- Configure environment variables and secrets
+- End-to-end testing
+- Demo scenarios
+- Documentation and presentation
+
 **Working style:** Proceed step by step. Do not assume a setup command succeeded until its output is checked.

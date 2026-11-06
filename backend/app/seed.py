@@ -12,6 +12,11 @@ from .models import (
     Ingress,
     Certificate,
     Workload,
+    SupportTicket,
+    IncidentScenario,
+    ScenarioPodState,
+    DeploymentRevision,
+    PlatformEvent,
 )
 
 
@@ -203,6 +208,121 @@ def get_or_create_workload(db: Session, **attrs) -> Workload:
     return workload
 
 
+def get_or_create_support_ticket(
+    db: Session, tenant: Tenant, workload: Workload, ticket_key: str, **attrs
+) -> SupportTicket:
+    ticket = db.query(SupportTicket).filter_by(ticket_key=ticket_key).first()
+    if ticket is not None:
+        return ticket
+    if workload.tenant_id != tenant.id:
+        raise ValueError(
+            f"Workload {workload.name} does not belong to tenant {tenant.name}"
+        )
+    ticket = SupportTicket(
+        ticket_key=ticket_key,
+        tenant_id=tenant.id,
+        workload_id=workload.id,
+        **attrs,
+    )
+    db.add(ticket)
+    db.flush()
+    return ticket
+
+
+def get_or_create_incident_scenario(
+    db: Session, key: str, ticket: SupportTicket, workload: Workload, **attrs
+) -> IncidentScenario:
+    scenario = db.query(IncidentScenario).filter_by(key=key).first()
+    if scenario is not None:
+        return scenario
+    if ticket.workload_id != workload.id:
+        raise ValueError(
+            f"Ticket {ticket.ticket_key} is not linked to workload {workload.name}"
+        )
+    scenario = IncidentScenario(
+        key=key, ticket_id=ticket.id, workload_id=workload.id, **attrs
+    )
+    db.add(scenario)
+    db.flush()
+    return scenario
+
+
+def get_or_create_scenario_pod_state(
+    db: Session, scenario: IncidentScenario, pod: Pod, **attrs
+) -> ScenarioPodState:
+    state = (
+        db.query(ScenarioPodState)
+        .filter_by(scenario_id=scenario.id, pod_id=pod.id)
+        .first()
+    )
+    if state is not None:
+        return state
+    if pod.namespace.name != scenario.workload.namespace:
+        raise ValueError(
+            f"Pod {pod.name} is outside the scenario workload's namespace"
+        )
+    state = ScenarioPodState(scenario_id=scenario.id, pod_id=pod.id, **attrs)
+    db.add(state)
+    db.flush()
+    return state
+
+
+def get_or_create_deployment_revision(
+    db: Session,
+    workload: Workload,
+    revision: int,
+    scenario: IncidentScenario | None = None,
+    **attrs,
+) -> DeploymentRevision:
+    record = (
+        db.query(DeploymentRevision)
+        .filter_by(workload_id=workload.id, revision=revision)
+        .first()
+    )
+    if record is None:
+        record = DeploymentRevision(
+            workload_id=workload.id,
+            revision=revision,
+            scenario_id=scenario.id if scenario else None,
+            **attrs,
+        )
+        db.add(record)
+        db.flush()
+    return record
+
+
+def get_or_create_platform_event(
+    db: Session,
+    event_key: str,
+    namespace: Namespace,
+    workload: Workload,
+    scenario: IncidentScenario | None = None,
+    pod: Pod | None = None,
+    **attrs,
+) -> PlatformEvent:
+    event = db.query(PlatformEvent).filter_by(event_key=event_key).first()
+    if event is not None:
+        return event
+    if workload.namespace != namespace.name:
+        raise ValueError(
+            f"Workload {workload.name} is not in namespace {namespace.name}"
+        )
+    if pod is not None and pod.namespace_id != namespace.id:
+        raise ValueError(f"Pod {pod.name} is not in namespace {namespace.name}")
+    event = PlatformEvent(
+        event_key=event_key,
+        namespace_id=namespace.id,
+        cluster_id=namespace.cluster_id,
+        workload_id=workload.id,
+        scenario_id=scenario.id if scenario else None,
+        pod_id=pod.id if pod else None,
+        **attrs,
+    )
+    db.add(event)
+    db.flush()
+    return event
+
+
 def seed_database(db: Session):
     acme = get_or_create_tenant(db, "ACME Corp", "acme")
     globex = get_or_create_tenant(db, "Globex", "globex")
@@ -381,6 +501,7 @@ def seed_database(db: Session):
         )
 
     now = datetime.now(timezone.utc)
+    incident_now = now
     certificates = [
         (
             acme_ns,
@@ -430,6 +551,119 @@ def seed_database(db: Session):
             expires_at=expires_at,
             status="valid",
             renewal_status=renewal_status,
+        )
+
+    ticket = get_or_create_support_ticket(
+        db,
+        acme,
+        customer_portal,
+        "TCK-1001",
+        title="Customer Portal returning HTTP 503",
+        description=(
+            "Since this morning our customers get intermittent HTTP 503 "
+            "Service Unavailable errors when opening portal.acme.example.com. "
+            "Some requests succeed after retrying. Please investigate the "
+            "Customer Portal in production."
+        ),
+        severity="high",
+        status="open",
+    )
+
+    # Simulated incident for TCK-1001. Baseline pods stay healthy; the scenario
+    # overlays effective pod state and adds events and deployment history.
+    # Timestamps are relative to first seed and never rewritten afterwards.
+    scenario = get_or_create_incident_scenario(
+        db,
+        "acme-customer-portal-503",
+        ticket,
+        customer_portal,
+        name="Customer Portal unhealthy deployment (HTTP 503)",
+        description=(
+            "Simulated incident: revision 42 of customer-portal was rolled out "
+            "and two of its three pods fail readiness checks."
+        ),
+        status="active",
+    )
+
+    revisions = [
+        (40, None, "registry.example.com/acme/customer-portal:2.7.2", "healthy",
+         timedelta(days=12), "Routine release 2.7.2"),
+        (41, None, "registry.example.com/acme/customer-portal:2.7.3", "healthy",
+         timedelta(days=3), "Hotfix release 2.7.3"),
+        (42, scenario, "registry.example.com/acme/customer-portal:2.8.0", "failed",
+         timedelta(minutes=47), "Release 2.8.0: new checkout service client"),
+    ]
+    for number, owner, image, rev_status, age, cause in revisions:
+        get_or_create_deployment_revision(
+            db,
+            customer_portal,
+            number,
+            scenario=owner,
+            image=image,
+            status=rev_status,
+            deployed_at=incident_now - age,
+            change_cause=cause,
+        )
+
+    deployed_at = incident_now - timedelta(minutes=47)
+    portal_pods = {
+        p.name: p
+        for p in db.query(Pod).filter_by(namespace_id=acme_ns.id).all()
+    }
+    healthy_pod = portal_pods["customer-portal-7d9f6c-abc12"]
+    failing_pods = [
+        (portal_pods["customer-portal-7d9f6c-def34"], 3, timedelta(minutes=2)),
+        (portal_pods["customer-portal-7d9f6c-ghi56"], 5, timedelta(minutes=3)),
+    ]
+    for pod, restarts, _ in failing_pods:
+        get_or_create_scenario_pod_state(
+            db,
+            scenario,
+            pod,
+            status="Running",
+            ready_containers=0,
+            restart_count=restarts,
+            reason="ReadinessProbeFailed",
+        )
+
+    events = [
+        ("rollout-scale-up", None, "Normal", "ScalingReplicaSet",
+         "Scaled up replica set customer-portal-7d9f6c to 3",
+         "deployment-controller", 1, timedelta(minutes=0)),
+        ("rollout-scale-down", None, "Normal", "ScalingReplicaSet",
+         "Scaled down replica set customer-portal-5f8c4d to 0",
+         "deployment-controller", 1, timedelta(minutes=1)),
+        ("pod-abc12-started", healthy_pod, "Normal", "Started",
+         "Started container customer-portal", "kubelet", 1, timedelta(minutes=1)),
+    ]
+    for pod, _, offset in failing_pods:
+        suffix = pod.name.rsplit("-", 1)[1]
+        events.append(
+            (f"pod-{suffix}-readiness", pod, "Warning", "Unhealthy",
+             "Readiness probe failed: HTTP probe failed with statuscode: 500",
+             "kubelet", 12, offset)
+        )
+    for pod, _, offset in failing_pods:
+        suffix = pod.name.rsplit("-", 1)[1]
+        events.append(
+            (f"pod-{suffix}-backoff", pod, "Warning", "BackOff",
+             "Back-off restarting failed container customer-portal",
+             "kubelet", 4, offset + timedelta(minutes=5))
+        )
+    for key, pod, event_type, reason, message, component, count, offset in events:
+        get_or_create_platform_event(
+            db,
+            f"tck-1001-{key}",
+            acme_ns,
+            customer_portal,
+            scenario=scenario,
+            pod=pod,
+            event_type=event_type,
+            reason=reason,
+            message=message,
+            source_component=component,
+            count=count,
+            occurred_at=deployed_at + offset,
         )
 
     db.commit()

@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
@@ -25,6 +26,7 @@ class Tenant(Base):
 
     workloads = relationship("Workload", back_populates="tenant")
     namespaces = relationship("Namespace", back_populates="tenant")
+    support_tickets = relationship("SupportTicket", back_populates="tenant")
 
 
 class Cluster(Base):
@@ -124,6 +126,12 @@ class Workload(Base):
 
     tenant = relationship("Tenant", back_populates="workloads")
     services = relationship("Service", back_populates="workload")
+    support_tickets = relationship("SupportTicket", back_populates="workload")
+    incident_scenarios = relationship("IncidentScenario", back_populates="workload")
+    deployment_revisions = relationship(
+        "DeploymentRevision", back_populates="workload"
+    )
+    platform_events = relationship("PlatformEvent", back_populates="workload")
 
 
 class Service(Base):
@@ -207,3 +215,111 @@ class Certificate(Base):
     namespace = relationship("Namespace", back_populates="certificates")
     cluster = relationship("Cluster", back_populates="certificates")
     ingress = relationship("Ingress", back_populates="certificates")
+
+
+class SupportTicket(Base):
+    __tablename__ = "support_tickets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_key = Column(String(30), unique=True, nullable=False, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    workload_id = Column(Integer, ForeignKey("workloads.id"), nullable=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    severity = Column(String(30), default="medium")
+    status = Column(String(30), default="open")
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    tenant = relationship("Tenant", back_populates="support_tickets")
+    workload = relationship("Workload", back_populates="support_tickets")
+    incident_scenarios = relationship("IncidentScenario", back_populates="ticket")
+
+
+class IncidentScenario(Base):
+    """A simulated incident. Its data overlays, and never edits, baseline records."""
+
+    __tablename__ = "incident_scenarios"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(100), unique=True, nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    ticket_id = Column(Integer, ForeignKey("support_tickets.id"), nullable=False)
+    workload_id = Column(Integer, ForeignKey("workloads.id"), nullable=False)
+    status = Column(String(30), default="active")
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    ticket = relationship("SupportTicket", back_populates="incident_scenarios")
+    workload = relationship("Workload", back_populates="incident_scenarios")
+    pod_states = relationship("ScenarioPodState", back_populates="scenario")
+    events = relationship("PlatformEvent", back_populates="scenario")
+    deployment_revisions = relationship(
+        "DeploymentRevision", back_populates="scenario"
+    )
+
+
+class ScenarioPodState(Base):
+    """Effective pod health while a scenario is active. Baseline Pod rows are untouched."""
+
+    __tablename__ = "scenario_pod_states"
+    __table_args__ = (
+        UniqueConstraint("scenario_id", "pod_id", name="uq_scenario_pod_state"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    scenario_id = Column(Integer, ForeignKey("incident_scenarios.id"), nullable=False)
+    pod_id = Column(Integer, ForeignKey("pods.id"), nullable=False)
+    status = Column(String(30), nullable=False)
+    ready_containers = Column(Integer, nullable=False)
+    restart_count = Column(Integer, nullable=False)
+    reason = Column(String(100), nullable=True)
+
+    scenario = relationship("IncidentScenario", back_populates="pod_states")
+    pod = relationship("Pod")
+
+
+class DeploymentRevision(Base):
+    __tablename__ = "deployment_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "workload_id", "revision", name="uq_deployment_revision_workload_revision"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    workload_id = Column(Integer, ForeignKey("workloads.id"), nullable=False)
+    scenario_id = Column(Integer, ForeignKey("incident_scenarios.id"), nullable=True)
+    revision = Column(Integer, nullable=False)
+    image = Column(String(255), nullable=False)
+    status = Column(String(30), default="healthy")
+    deployed_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    change_cause = Column(String(255), nullable=True)
+
+    workload = relationship("Workload", back_populates="deployment_revisions")
+    scenario = relationship("IncidentScenario", back_populates="deployment_revisions")
+
+
+class PlatformEvent(Base):
+    __tablename__ = "platform_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_key = Column(String(100), unique=True, nullable=False, index=True)
+    scenario_id = Column(Integer, ForeignKey("incident_scenarios.id"), nullable=True)
+    namespace_id = Column(Integer, ForeignKey("namespaces.id"), nullable=False)
+    cluster_id = Column(Integer, ForeignKey("clusters.id"), nullable=False)
+    workload_id = Column(Integer, ForeignKey("workloads.id"), nullable=True)
+    pod_id = Column(Integer, ForeignKey("pods.id"), nullable=True)
+    event_type = Column(String(20), default="Normal")
+    reason = Column(String(100), nullable=False)
+    message = Column(Text, nullable=False)
+    source_component = Column(String(100), nullable=True)
+    count = Column(Integer, default=1)
+    occurred_at = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    scenario = relationship("IncidentScenario", back_populates="events")
+    workload = relationship("Workload", back_populates="platform_events")
+    pod = relationship("Pod")

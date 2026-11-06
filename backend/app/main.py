@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,8 @@ from .schemas import (
     CertificateListResponse,
     CertificateSummaryResponse,
     SeverityCounts,
+    TicketListResponse,
+    TicketResponse,
 )
 from .seed import seed_database
 from .services.certificate_expiry import (
@@ -21,6 +23,8 @@ from .services.certificate_expiry import (
     evaluate_certificates,
     summarize,
 )
+from .services.investigation import InvestigationEvidence, gather_evidence
+from .services.investigation_analysis import InvestigationReport, build_report
 
 
 @asynccontextmanager
@@ -154,3 +158,78 @@ def certificate_summary(
         warning_days=WARNING_DAYS,
         critical_days=CRITICAL_DAYS,
     )
+
+
+def _ticket_response(db: Session, ticket: models.SupportTicket) -> TicketResponse:
+    workload = ticket.workload
+    cluster = (
+        db.get(models.Cluster, workload.cluster_id)
+        if workload is not None and workload.cluster_id
+        else None
+    )
+    return TicketResponse(
+        id=ticket.id,
+        ticket_key=ticket.ticket_key,
+        title=ticket.title,
+        description=ticket.description,
+        severity=ticket.severity,
+        status=ticket.status,
+        created_at=ticket.created_at,
+        tenant_id=ticket.tenant_id,
+        tenant=ticket.tenant.name,
+        workload_id=ticket.workload_id,
+        workload=workload.name if workload else None,
+        namespace=workload.namespace if workload else None,
+        cluster=cluster.name if cluster else None,
+    )
+
+
+def _get_ticket_or_404(db: Session, ticket_id: int) -> models.SupportTicket:
+    ticket = db.get(models.SupportTicket, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return ticket
+
+
+@app.get("/api/platform/tickets", response_model=TicketListResponse)
+def list_tickets(
+    status: str | None = None,
+    tenant: str | None = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(models.SupportTicket).join(models.SupportTicket.tenant)
+    if status is not None:
+        query = query.filter(models.SupportTicket.status == status)
+    if tenant is not None:
+        query = query.filter(models.Tenant.slug == tenant)
+    tickets = query.order_by(
+        models.SupportTicket.created_at.desc(), models.SupportTicket.id.desc()
+    ).all()
+
+    return TicketListResponse(
+        count=len(tickets),
+        tickets=[_ticket_response(db, t) for t in tickets],
+    )
+
+
+@app.get("/api/platform/tickets/{ticket_id}", response_model=TicketResponse)
+def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
+    return _ticket_response(db, _get_ticket_or_404(db, ticket_id))
+
+
+@app.get(
+    "/api/platform/tickets/{ticket_id}/investigation",
+    response_model=InvestigationEvidence,
+)
+def get_ticket_investigation(ticket_id: int, db: Session = Depends(get_db)):
+    ticket = _get_ticket_or_404(db, ticket_id)
+    return gather_evidence(db, ticket)
+
+
+@app.get(
+    "/api/platform/tickets/{ticket_id}/investigation/analysis",
+    response_model=InvestigationReport,
+)
+def get_ticket_investigation_analysis(ticket_id: int, db: Session = Depends(get_db)):
+    ticket = _get_ticket_or_404(db, ticket_id)
+    return build_report(db, ticket)

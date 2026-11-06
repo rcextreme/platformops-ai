@@ -199,7 +199,7 @@ Do not introduce a multi-agent framework or make unrelated frontend/database cha
 
 ## Milestone 5 — Policy Engine, Approval Workflow, and Remediation
 
-<status>PLANNED</status>
+<status>COMPLETED</status>
 
 Turn AI recommendations into controlled operational workflows.
 
@@ -247,6 +247,8 @@ Expected workflow:
 **Acceptance criteria:** A user can approve the proposed rollback, execute it in the simulated environment, and see the application recover from 1/3 ready replicas to 3/3.
 
 No real production infrastructure changes are permitted in the hackathon demo.
+
+**Implementation note (2026-11-06):** The deterministic policy engine supports `auto_approved`, `approval_required`, and `escalation_required`. The analyzer currently proposes only the ACME production rollback, which requires human approval; no auto-approved operation is currently proposed or introduced. The simulated 42-to-41 rollback records approval, execution, and verification, removes failed scenario pod overrides, and resolves TCK-1001 only when all checks pass. Baseline Workload and Pod rows remain unchanged. The operator identity is user-supplied for demo purposes and is not authentication. Full backend suite: 157 passed.
 
 ## Milestone 6 — Operational Dashboard and Demo Experience
 
@@ -332,7 +334,7 @@ Deliverables:
 | 2 | Simulated infrastructure and certificates | Complete |
 | 3 | Support tickets and investigation engine | Complete |
 | 4 | AI reasoning and support assessment | Complete (147 tests; live Vultr inference verified) |
-| 5 | Policy, approval, and remediation | Planned |
+| 5 | Policy, approval, and remediation | Complete (157 backend tests passed) |
 | 6 | Dashboard and demo experience | Planned |
 | 7 | Vultr deployment and presentation | Planned |
 
@@ -344,13 +346,9 @@ The ACME HTTP 503 scenario is the primary demonstration. Avoid expanding into ad
 
 Priority order:
 
-1. Complete AI reasoning.
-2. Implement deterministic action policy.
-3. Implement human approval.
-4. Implement simulated rollback and recovery verification.
-5. Connect the workflow to the dashboard.
-6. Deploy to Vultr.
-7. Polish the presentation.
+1. Connect the investigation, approval, simulated rollback, and verification workflow to the dashboard.
+2. Deploy to Vultr.
+3. Polish the presentation.
 
 ## 6. Definition of Success
 

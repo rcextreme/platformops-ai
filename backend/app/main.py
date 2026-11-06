@@ -10,11 +10,17 @@ from sqlalchemy.orm import Session
 from .database import Base, engine, SessionLocal, get_db
 from . import models
 from .schemas import (
+    ApprovalRequest,
+    ApprovalResponse,
     CertificateListResponse,
     CertificateSummaryResponse,
+    ExecutionResponse,
+    PolicyActionListResponse,
+    PolicyActionResponse,
     SeverityCounts,
     TicketListResponse,
     TicketResponse,
+    VerificationResponse,
 )
 from .seed import seed_database
 from .services.certificate_expiry import (
@@ -33,6 +39,10 @@ from .services.ai_assessment import (
     generate_assessment,
 )
 from .services.llm_provider import LLMProvider, LLMUnavailableError, get_llm_provider
+from .models import ApprovalDecision, PolicyAction, RemediationExecution
+from .services.policy_engine import evaluate_ticket_actions
+from .services.remediation import WorkflowConflict, execute_simulated_action
+import json
 
 
 @asynccontextmanager
@@ -272,4 +282,190 @@ def get_ticket_investigation_ai(
             ticket_key=report.ticket_key,
             reason=reason,
         ).model_dump(),
+    )
+
+
+def _action_response(action: PolicyAction) -> PolicyActionResponse:
+    approval = action.approval
+    execution = action.execution
+    verification = execution.verification if execution is not None else None
+    return PolicyActionResponse(
+        id=action.id,
+        ticket_id=action.ticket_id,
+        tenant=action.ticket.tenant.name,
+        action_type=action.action_type,
+        classification=action.classification,
+        status=action.status,
+        rule_version=action.rule_version,
+        rationale=action.rationale,
+        risk=action.risk,
+        expected_impact=action.expected_impact,
+        target_workload=action.target_workload,
+        namespace=action.namespace,
+        cluster=action.cluster,
+        from_revision=action.from_revision,
+        to_revision=action.to_revision,
+        evidence_refs=json.loads(action.evidence_refs),
+        evaluated_at=action.evaluated_at,
+        approval=(
+            ApprovalResponse(
+                decision=approval.decision,
+                operator=approval.operator,
+                reason=approval.reason,
+                decided_at=approval.decided_at,
+            )
+            if approval is not None
+            else None
+        ),
+        execution=(
+            ExecutionResponse(
+                outcome=execution.outcome,
+                previous_state=json.loads(execution.previous_state),
+                resulting_state=json.loads(execution.resulting_state),
+                started_at=execution.started_at,
+                completed_at=execution.completed_at,
+                verification=(
+                    VerificationResponse(
+                        passed=verification.passed,
+                        checks=json.loads(verification.checks),
+                        verified_at=verification.verified_at,
+                    )
+                    if verification is not None
+                    else None
+                ),
+            )
+            if execution is not None
+            else None
+        ),
+    )
+
+
+@app.post(
+    "/api/platform/tickets/{ticket_id}/actions/evaluate",
+    response_model=PolicyActionListResponse,
+)
+def evaluate_ticket_policy(ticket_id: int, db: Session = Depends(get_db)):
+    ticket = _get_ticket_or_404(db, ticket_id)
+    actions = evaluate_ticket_actions(db, ticket)
+    db.commit()
+    return PolicyActionListResponse(
+        ticket_id=ticket.id,
+        count=len(actions),
+        actions=[_action_response(action) for action in actions],
+    )
+
+
+@app.get(
+    "/api/platform/tickets/{ticket_id}/actions",
+    response_model=PolicyActionListResponse,
+)
+def list_ticket_actions(ticket_id: int, db: Session = Depends(get_db)):
+    ticket = _get_ticket_or_404(db, ticket_id)
+    actions = (
+        db.query(PolicyAction)
+        .filter_by(ticket_id=ticket.id)
+        .order_by(PolicyAction.evaluated_at, PolicyAction.id)
+        .all()
+    )
+    return PolicyActionListResponse(
+        ticket_id=ticket.id,
+        count=len(actions),
+        actions=[_action_response(action) for action in actions],
+    )
+
+
+@app.get(
+    "/api/platform/actions/{action_id}",
+    response_model=PolicyActionResponse,
+)
+def get_action_history(action_id: int, db: Session = Depends(get_db)):
+    action = db.get(PolicyAction, action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Action not found")
+    return _action_response(action)
+
+
+@app.post(
+    "/api/platform/actions/{action_id}/approval",
+    response_model=ApprovalResponse,
+)
+def decide_action_approval(
+    action_id: int,
+    request: ApprovalRequest,
+    db: Session = Depends(get_db),
+):
+    action = db.get(PolicyAction, action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Action not found")
+    existing = (
+        db.query(ApprovalDecision)
+        .filter_by(policy_action_id=action.id)
+        .one_or_none()
+    )
+    if existing is not None:
+        if existing.decision != request.decision:
+            raise HTTPException(status_code=409, detail="A conflicting final decision already exists")
+        return ApprovalResponse(
+            decision=existing.decision,
+            operator=existing.operator,
+            reason=existing.reason,
+            decided_at=existing.decided_at,
+        )
+    if action.classification != "approval_required" or action.status != "pending_approval":
+        raise HTTPException(status_code=409, detail="Action is not awaiting human approval")
+    decision = ApprovalDecision(
+        policy_action_id=action.id,
+        decision=request.decision,
+        operator=request.operator,
+        reason=request.reason,
+        decided_at=datetime.now(timezone.utc),
+    )
+    db.add(decision)
+    action.status = "approved" if request.decision == "approve" else "rejected"
+    db.commit()
+    db.refresh(decision)
+    return ApprovalResponse(
+        decision=decision.decision,
+        operator=decision.operator,
+        reason=decision.reason,
+        decided_at=decision.decided_at,
+    )
+
+
+@app.post(
+    "/api/platform/actions/{action_id}/execute",
+    response_model=ExecutionResponse,
+)
+def execute_action(action_id: int, db: Session = Depends(get_db)):
+    action = db.get(PolicyAction, action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Action not found")
+    existing = (
+        db.query(RemediationExecution)
+        .filter_by(policy_action_id=action.id)
+        .one_or_none()
+    )
+    try:
+        execution = execute_simulated_action(db, action)
+    except WorkflowConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    db.refresh(execution)
+    verification = execution.verification
+    return ExecutionResponse(
+        outcome=execution.outcome,
+        previous_state=json.loads(execution.previous_state),
+        resulting_state=json.loads(execution.resulting_state),
+        started_at=execution.started_at,
+        completed_at=execution.completed_at,
+        verification=(
+            VerificationResponse(
+                passed=verification.passed,
+                checks=json.loads(verification.checks),
+                verified_at=verification.verified_at,
+            )
+            if verification is not None
+            else None
+        ),
+        idempotent_replay=existing is not None,
     )

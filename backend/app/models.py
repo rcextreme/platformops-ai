@@ -235,6 +235,7 @@ class SupportTicket(Base):
     tenant = relationship("Tenant", back_populates="support_tickets")
     workload = relationship("Workload", back_populates="support_tickets")
     incident_scenarios = relationship("IncidentScenario", back_populates="ticket")
+    policy_actions = relationship("PolicyAction", back_populates="ticket")
 
 
 class IncidentScenario(Base):
@@ -323,3 +324,101 @@ class PlatformEvent(Base):
     scenario = relationship("IncidentScenario", back_populates="events")
     workload = relationship("Workload", back_populates="platform_events")
     pod = relationship("Pod")
+
+
+class PolicyAction(Base):
+    """Persisted deterministic authorization decision for a ticket action."""
+
+    __tablename__ = "policy_actions"
+    __table_args__ = (
+        UniqueConstraint("action_key", name="uq_policy_action_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    action_key = Column(String(255), nullable=False)
+    ticket_id = Column(Integer, ForeignKey("support_tickets.id"), nullable=False)
+    action_type = Column(String(50), nullable=False)
+    classification = Column(String(30), nullable=False)
+    status = Column(String(30), nullable=False)
+    rule_version = Column(String(50), nullable=False)
+    rationale = Column(Text, nullable=False)
+    risk = Column(Text, nullable=False)
+    expected_impact = Column(Text, nullable=False)
+    target_workload = Column(String(100), nullable=False)
+    namespace = Column(String(100), nullable=True)
+    cluster = Column(String(100), nullable=True)
+    from_revision = Column(Integer, nullable=False)
+    to_revision = Column(Integer, nullable=False)
+    evidence_refs = Column(Text, nullable=False)
+    evaluated_at = Column(DateTime(timezone=True), nullable=False)
+
+    ticket = relationship("SupportTicket", back_populates="policy_actions")
+    approval = relationship(
+        "ApprovalDecision", back_populates="policy_action", uselist=False
+    )
+    execution = relationship(
+        "RemediationExecution", back_populates="policy_action", uselist=False
+    )
+
+
+class ApprovalDecision(Base):
+    """A single final human decision; identity is demo-only, not authentication."""
+
+    __tablename__ = "approval_decisions"
+    __table_args__ = (
+        UniqueConstraint("policy_action_id", name="uq_approval_action"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    policy_action_id = Column(
+        Integer, ForeignKey("policy_actions.id"), nullable=False
+    )
+    decision = Column(String(20), nullable=False)
+    operator = Column(String(100), nullable=False)
+    reason = Column(Text, nullable=False)
+    decided_at = Column(DateTime(timezone=True), nullable=False)
+
+    policy_action = relationship("PolicyAction", back_populates="approval")
+
+
+class RemediationExecution(Base):
+    """One simulated execution attempt per explicitly authorized action."""
+
+    __tablename__ = "remediation_executions"
+    __table_args__ = (
+        UniqueConstraint("policy_action_id", name="uq_execution_action"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    policy_action_id = Column(
+        Integer, ForeignKey("policy_actions.id"), nullable=False
+    )
+    outcome = Column(String(30), nullable=False)
+    previous_state = Column(Text, nullable=False)
+    resulting_state = Column(Text, nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=False)
+
+    policy_action = relationship("PolicyAction", back_populates="execution")
+    verification = relationship(
+        "VerificationResult", back_populates="execution", uselist=False
+    )
+
+
+class VerificationResult(Base):
+    """Persisted post-remediation checks."""
+
+    __tablename__ = "verification_results"
+    __table_args__ = (
+        UniqueConstraint("execution_id", name="uq_verification_execution"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_id = Column(
+        Integer, ForeignKey("remediation_executions.id"), nullable=False
+    )
+    passed = Column(Boolean, nullable=False)
+    checks = Column(Text, nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=False)
+
+    execution = relationship("RemediationExecution", back_populates="verification")

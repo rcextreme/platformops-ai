@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, SessionLocal, get_db
@@ -25,6 +26,13 @@ from .services.certificate_expiry import (
 )
 from .services.investigation import InvestigationEvidence, gather_evidence
 from .services.investigation_analysis import InvestigationReport, build_report
+from .services.ai_assessment import (
+    AIAssessmentResponse,
+    AIUnavailableResponse,
+    InvalidModelOutputError,
+    generate_assessment,
+)
+from .services.llm_provider import LLMProvider, LLMUnavailableError, get_llm_provider
 
 
 @asynccontextmanager
@@ -233,3 +241,35 @@ def get_ticket_investigation(ticket_id: int, db: Session = Depends(get_db)):
 def get_ticket_investigation_analysis(ticket_id: int, db: Session = Depends(get_db)):
     ticket = _get_ticket_or_404(db, ticket_id)
     return build_report(db, ticket)
+
+
+@app.get(
+    "/api/platform/tickets/{ticket_id}/investigation/ai",
+    response_model=AIAssessmentResponse,
+    responses={
+        502: {"model": AIUnavailableResponse},
+        503: {"model": AIUnavailableResponse},
+    },
+)
+def get_ticket_investigation_ai(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    provider: LLMProvider = Depends(get_llm_provider),
+):
+    ticket = _get_ticket_or_404(db, ticket_id)
+    report = build_report(db, ticket)
+    try:
+        return generate_assessment(report, provider)
+    except LLMUnavailableError as exc:
+        status_code, status, reason = 503, "provider_unavailable", exc.reason
+    except InvalidModelOutputError as exc:
+        status_code, status, reason = 502, "provider_invalid_response", str(exc)
+    return JSONResponse(
+        status_code=status_code,
+        content=AIUnavailableResponse(
+            status=status,
+            ticket_id=report.ticket_id,
+            ticket_key=report.ticket_key,
+            reason=reason,
+        ).model_dump(),
+    )

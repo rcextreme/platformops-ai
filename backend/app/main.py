@@ -1,12 +1,26 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Annotated
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, SessionLocal, get_db
 from . import models
+from .schemas import (
+    CertificateListResponse,
+    CertificateSummaryResponse,
+    SeverityCounts,
+)
 from .seed import seed_database
+from .services.certificate_expiry import (
+    CRITICAL_DAYS,
+    WARNING_DAYS,
+    Severity,
+    evaluate_certificates,
+    summarize,
+)
 
 
 @asynccontextmanager
@@ -91,3 +105,52 @@ def platform_overview(db: Session = Depends(get_db)):
             for w in workloads
         ],
     }
+
+
+@app.get("/api/platform/certificates", response_model=CertificateListResponse)
+def list_certificates(
+    namespace: str | None = None,
+    cluster: str | None = None,
+    severity: Annotated[list[Severity] | None, Query()] = None,
+    include_healthy: bool = True,
+    db: Session = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    findings = evaluate_certificates(
+        db,
+        now=now,
+        namespace=namespace,
+        cluster=cluster,
+        severity=severity,
+        include_healthy=include_healthy,
+    )
+
+    return CertificateListResponse(
+        generated_at=now,
+        count=len(findings),
+        findings=findings,
+    )
+
+
+@app.get(
+    "/api/platform/certificates/summary",
+    response_model=CertificateSummaryResponse,
+)
+def certificate_summary(
+    namespace: str | None = None,
+    cluster: str | None = None,
+    db: Session = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    findings = evaluate_certificates(
+        db, now=now, namespace=namespace, cluster=cluster
+    )
+
+    return CertificateSummaryResponse(
+        generated_at=now,
+        total=len(findings),
+        counts=SeverityCounts(**summarize(findings)),
+        renewal_attention=sum(1 for f in findings if f.renewal_attention),
+        warning_days=WARNING_DAYS,
+        critical_days=CRITICAL_DAYS,
+    )

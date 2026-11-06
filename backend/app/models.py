@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -39,6 +41,9 @@ class Cluster(Base):
     namespaces = relationship("Namespace", back_populates="cluster")
     nodes = relationship("Node", back_populates="cluster")
     pods = relationship("Pod", back_populates="cluster")
+    services = relationship("Service", back_populates="cluster")
+    ingresses = relationship("Ingress", back_populates="cluster")
+    certificates = relationship("Certificate", back_populates="cluster")
 
 
 class Node(Base):
@@ -75,6 +80,9 @@ class Namespace(Base):
     tenant = relationship("Tenant", back_populates="namespaces")
     cluster = relationship("Cluster", back_populates="namespaces")
     pods = relationship("Pod", back_populates="namespace")
+    services = relationship("Service", back_populates="namespace")
+    ingresses = relationship("Ingress", back_populates="namespace")
+    certificates = relationship("Certificate", back_populates="namespace")
 
 
 class Pod(Base):
@@ -115,3 +123,87 @@ class Workload(Base):
     status = Column(String(30), default="healthy")
 
     tenant = relationship("Tenant", back_populates="workloads")
+    services = relationship("Service", back_populates="workload")
+
+
+class Service(Base):
+    __tablename__ = "services"
+    __table_args__ = (
+        UniqueConstraint("namespace_id", "name", name="uq_service_namespace_name"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    namespace_id = Column(Integer, ForeignKey("namespaces.id"), nullable=False)
+    cluster_id = Column(Integer, ForeignKey("clusters.id"), nullable=False)
+    workload_id = Column(Integer, ForeignKey("workloads.id"), nullable=False)
+    service_type = Column(String(30), default="ClusterIP")
+    port = Column(Integer, nullable=False)
+    target_port = Column(Integer, nullable=False)
+    protocol = Column(String(10), default="TCP")
+    status = Column(String(30), default="healthy")
+    cluster_ip = Column(String(45), nullable=True)
+
+    namespace = relationship("Namespace", back_populates="services")
+    cluster = relationship("Cluster", back_populates="services")
+    workload = relationship("Workload", back_populates="services")
+    ingresses = relationship("Ingress", back_populates="service")
+
+
+class Ingress(Base):
+    __tablename__ = "ingresses"
+    __table_args__ = (
+        UniqueConstraint("namespace_id", "name", name="uq_ingress_namespace_name"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    namespace_id = Column(Integer, ForeignKey("namespaces.id"), nullable=False)
+    cluster_id = Column(Integer, ForeignKey("clusters.id"), nullable=False)
+    service_id = Column(Integer, ForeignKey("services.id"), nullable=False)
+    host = Column(String(255), nullable=False)
+    path = Column(String(255), default="/")
+    path_type = Column(String(30), default="Prefix")
+    ingress_class = Column(String(100), default="nginx")
+    tls_enabled = Column(Boolean, default=False)
+    tls_secret_name = Column(String(100), nullable=True)
+    status = Column(String(30), default="healthy")
+
+    namespace = relationship("Namespace", back_populates="ingresses")
+    cluster = relationship("Cluster", back_populates="ingresses")
+    service = relationship("Service", back_populates="ingresses")
+    certificates = relationship("Certificate", back_populates="ingress")
+
+
+class Certificate(Base):
+    __tablename__ = "certificates"
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace_id", "name", name="uq_certificate_namespace_name"
+        ),
+        UniqueConstraint(
+            "namespace_id",
+            "tls_secret_name",
+            name="uq_certificate_namespace_secret",
+        ),
+        CheckConstraint(
+            "expires_at > issued_at", name="ck_certificate_expires_after_issued"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    namespace_id = Column(Integer, ForeignKey("namespaces.id"), nullable=False)
+    cluster_id = Column(Integer, ForeignKey("clusters.id"), nullable=False)
+    ingress_id = Column(Integer, ForeignKey("ingresses.id"), nullable=True)
+    tls_secret_name = Column(String(100), nullable=False)
+    issuer = Column(String(255), nullable=False)
+    subject = Column(String(255), nullable=False)
+    issued_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    status = Column(String(30), default="valid")
+    renewal_status = Column(String(30), default="not_due")
+
+    namespace = relationship("Namespace", back_populates="certificates")
+    cluster = relationship("Cluster", back_populates="certificates")
+    ingress = relationship("Ingress", back_populates="certificates")
